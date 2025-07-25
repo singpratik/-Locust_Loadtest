@@ -7,7 +7,7 @@ import requests
 import urllib3
 from locust import HttpUser, task, between
 import json
-import traceback  # Add this import
+import traceback
 
 # Set up logging
 logging.basicConfig(
@@ -41,7 +41,7 @@ def load_user_credentials(file_path):
 def get_credentials_path():
     """Get the path to the user credentials CSV."""
     potential_paths = [
-        '/Users/pratik/Downloads/Assesment/Load_Test/user.csv',
+        '/Users/pratiksingh/Desktop/Interview_automation/Interview_load/user.csv',
         os.path.join(os.path.dirname(__file__), 'user_cred.csv'),
         'user_cred.csv'
     ]
@@ -57,7 +57,7 @@ USER_CREDENTIALS = load_user_credentials(get_credentials_path())
 
 class InterviewUser(HttpUser):
     wait_time = between(20, 60)
-    host = "https://api-prod-us-candidate.vmock.com"
+    host = "https://api-uat-us-candidate.vmock.dev"
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -66,8 +66,9 @@ class InterviewUser(HttpUser):
         self.question_data = {}
         self.user_credentials = None
         self.current_uid = None
-        self.available_uids =[]
+        self.available_uids = []
         self.current_uid_index = 0
+        self.interview_data = {}  # Added to fix missing attribute
         
         if not USER_CREDENTIALS:
             raise ValueError("No user credentials available for load testing")
@@ -106,8 +107,8 @@ class InterviewUser(HttpUser):
         for uid in self.available_uids:
             self.current_uid = uid
             logger.info(f"\n{'='*50}\nProcessing UID: {uid}\n{'='*50}")
-            
-            if not self.process_question(uid):
+
+            if not self.process_next_question(uid):  # Fixed: Removed self from arguments
                 logger.error(f"Failed to process question for UID {uid}")
                 return
 
@@ -123,23 +124,20 @@ class InterviewUser(HttpUser):
             logger.error("Failed to properly end interview")
             return
 
-        logger.info(f"\n{'*'*50}\nInterview completed successfully!\nInterview ID: {self.current_interview_id}\n{'*'*50}")    
-
-        
-
-        
-        
-            
-        
+        logger.info(f"\n{'*'*50}\nInterview completed successfully!\nInterview ID: {self.current_interview_id}\n{'*'*50}")
 
     def login(self):
         """Perform login and return True if successful."""
+        if not self.user_credentials or not isinstance(self.user_credentials, dict):
+            logger.error("Invalid user credentials")
+            return False
+            
         payload = {
-            "email": self.user_credentials["email"],
-            "password": self.user_credentials["password"],
+            "email": self.user_credentials.get("email", ""),
+            "password": self.user_credentials.get("password", ""),
             "provider": "email"
         }
-        logger.info(f"Attempting to login with email: {self.user_credentials['email']}")
+        logger.info(f"Attempting to login with email: {self.user_credentials.get('email')}")
 
         with self.client.post(
             "/dashboard-api-accounts/api/v1/login/common",
@@ -149,10 +147,11 @@ class InterviewUser(HttpUser):
         ) as response:
             if response.status_code == 200:
                 self.access_token = response.json().get('access_token')
-                logger.info(f"Login successful for user: {self.user_credentials['email']}")
+                logger.info(f"Login successful for user: {self.user_credentials.get('email')}")
                 return True
-            logger.error(f"Login failed for user: {self.user_credentials['email']} with status {response.status_code}")
+            logger.error(f"Login failed for user: {self.user_credentials.get('email')} with status {response.status_code}")
             return False
+
     def create_mock_interview(self):
         """Create mock interview with updated payload and better error handling."""
         if not self.access_token:
@@ -164,11 +163,8 @@ class InterviewUser(HttpUser):
             "Content-Type": "application/json"
         }
         
-        # Updated payload with correct template_id and question IDs
         payload = {
             "template_id": 8000,
-            # "difficulty": "Basic",
-            # "language": "en",
             "selected_questions": [
                 202965, 202966, 202967, 202968, 202969,
                 202970, 202971, 202972, 202973, 202974,
@@ -201,12 +197,6 @@ class InterviewUser(HttpUser):
             logger.error(f"Failed to create mock interview. Status: {response.status_code}")
             logger.error(f"Response: {response.text}")
             return False
-                    
-                       
-                    
-            
-            
-        
 
     def start_calibration(self):
         """Start the calibration."""
@@ -280,68 +270,61 @@ class InterviewUser(HttpUser):
             return False
         
     def process_current_uid_uploads(self, response_data):
-            """Process uploads for current UID."""
-            upload_urls = response_data.get('upload_urls', {})
-            video_urls = upload_urls.get('video_urls', [])
-            audio_urls = upload_urls.get('audio_chunks_urls', [])
-
-            logger.info(f"Processing uploads for UID {self.current_uid}")
+        """Process uploads for current UID."""
+        if not response_data:
+            logger.error("No response data provided")
+            return False
             
-            video_directory = "/Users/pratiksingh/Desktop/No-code-automation-demo-main/TopcoderAutomationDemo/LoadTest/mi_clips"
-            audio_directory = "/Users/pratiksingh/Desktop/No-code-automation-demo-main/TopcoderAutomationDemo/LoadTest/mi_clips"
+        upload_urls = response_data.get('upload_urls', {})
+        video_urls = upload_urls.get('video_urls', [])
+        audio_urls = upload_urls.get('audio_chunks_urls', [])
 
-            video_files = self.get_local_files(video_directory, ['.mkv', '.mp4'])
-            audio_files = self.get_local_files(audio_directory, ['.wav', '.mp3'])
-
-            # Process audio clips
-            for i, audio_url in enumerate(audio_urls):
-                if i >= len(audio_files):
-                    logger.warning(f"Not enough audio files. Need {len(audio_urls)}, have {len(audio_files)}")
-                    return False
-
-                is_last = (i == len(audio_files) - 1)
-                if not self.upload_and_process_audio(audio_files[i], audio_url, i, is_last):
-                    return False
-
-            # Process video clips
-            for j, video_url in enumerate(video_urls):
-                if j >= len(video_files):
-                    logger.warning(f"Not enough video files. Need {len(video_urls)}, have {len(video_files)}")
-                    return False
-
-                if not self.upload_and_process_video(video_files[j], video_url, j):
-                    return False
-
-            return True       
-
+        logger.info(f"Processing uploads for UID {self.current_uid}")
         
-            
-# Helper method to access stored interview data
+        video_directory = "/Users/pratiksingh/Desktop/No-code-automation-demo-main/TopcoderAutomationDemo/LoadTest/mi_clips"
+        audio_directory = "/Users/pratiksingh/Desktop/No-code-automation-demo-main/TopcoderAutomationDemo/LoadTest/mi_clips"
+
+        video_files = self.get_local_files(video_directory, ['.mkv', '.mp4'])
+        audio_files = self.get_local_files(audio_directory, ['.wav', '.mp3'])
+
+        # Process audio clips
+        for i, audio_url in enumerate(audio_urls):
+            if i >= len(audio_files):
+                logger.warning(f"Not enough audio files. Need {len(audio_urls)}, have {len(audio_files)}")
+                return False
+
+            is_last = (i == len(audio_files) - 1)
+            if not self.upload_and_process_audio(audio_files[i], audio_url, i, is_last):
+                return False
+
+        # Process video clips
+        for j, video_url in enumerate(video_urls):
+            if j >= len(video_files):
+                logger.warning(f"Not enough video files. Need {len(video_urls)}, have {len(video_files)}")
+                return False
+
+            if not self.upload_and_process_video(video_files[j], video_url, j):
+                return False
+
+        return True
+
     def get_interview_data(self):
-                """
-                Get the stored interview data in a structured format
-                Returns:
-                    dict: Formatted interview data including interview_id, question_data, and upload_urls
-                """
-                if hasattr(self, 'interview_data'):
-                    return self.interview_data
-                return None  
+        """
+        Get the stored interview data in a structured format
+        Returns:
+            dict: Formatted interview data including interview_id, question_data, and upload_urls
+        """
+        return self.interview_data
       
-# Helper method to get specific question data
     def get_question_data(self, uid):
-                """
-                Get data for a specific question by UID
-                Args:
-                    uid (str): Question UID
-                Returns:
-                    dict: Question data or None if not found
-                """
-                if hasattr(self, 'interview_data'):
-                    return self.interview_data["question_data"].get(str(uid))
-                return None 
-
-
-#get_local_files        
+        """
+        Get data for a specific question by UID
+        Args:
+            uid (str): Question UID
+        Returns:
+            dict: Question data or None if not found
+        """
+        return self.interview_data.get("question_data", {}).get(str(uid))
 
     def get_local_files(self, directory, extensions):
         """Retrieve a list of files from a directory with specified extensions."""
@@ -358,9 +341,6 @@ class InterviewUser(HttpUser):
             logger.error(f"Error accessing directory {directory}: {str(e)}")
         return files
     
-
-#Hit_upload_video_clip   
-
     def upload_video_clip(self, file_path, upload_url):
         """Upload video clip to the specified URL"""
         if not os.path.exists(file_path):
@@ -383,8 +363,6 @@ class InterviewUser(HttpUser):
         except Exception as e:
             logger.error(f"Error uploading video: {str(e)}")
             return False
-
-#Hit_upload_audio_clip       
 
     def upload_audio_clip(self, file_path, upload_url):
         """Upload audio clip to S3 using presigned URL"""
@@ -415,8 +393,6 @@ class InterviewUser(HttpUser):
             logger.error(f"Error during audio upload: {str(e)}")
             return False 
 
-#Hit_process_audio_clip        
-
     def process_audio_clip(self, clip_id, is_last=False):
         """Process uploaded audio clip."""
         if not self.access_token or not self.current_interview_id:
@@ -435,15 +411,15 @@ class InterviewUser(HttpUser):
         payload = {
             "interview_id": self.current_interview_id,
             "clip_id": clip_id,
-            "uid": self.current_uid,
+            "uid": str(self.current_uid),  # Ensure uid is string
             "is_last": is_last
         }
 
         logger.info(f"procesing audio clip for UID{self.current_uid}")
         logger.info(f"Clip id : {clip_id}")
-        logger.info (f"is last {is_last}")
+        logger.info(f"is last {is_last}")
 
-        logger.info(f"Processing audio clip with payload: {payload}")  # Log the payload
+        logger.info(f"Processing audio clip with payload: {payload}")
 
         with self.client.post(
             "/interviews-api/v1/interview/process/audio-clip",
@@ -454,15 +430,10 @@ class InterviewUser(HttpUser):
         ) as response:
             if response.status_code == 200:
                 response_data = response.json()
-                # if 'uid' in response_data:
-                #     self.current_uid = response_data['uid']  # Update current_uid
-                # Don't update current_uid here as it's managed by the main flow
                 logger.info(f"Successfully processed audio clip {clip_id}")
                 return True
             logger.error(f"Failed to process audio clip {clip_id}: {response.status_code} - {response.text}")
             return False            
-
-
 
     def process_video_clip(self, clip_id):
         """Process uploaded video clip"""
@@ -482,10 +453,10 @@ class InterviewUser(HttpUser):
         payload = {
             "interview_id": self.current_interview_id,
             "clip_id": clip_id,
-            "uid": self.current_uid
+            "uid": str(self.current_uid)  # Ensure uid is string
         }
 
-        logger.info(f"Processing video clip with payload: {payload}")  # Log the payload
+        logger.info(f"Processing video clip with payload: {payload}")
 
         with self.client.post(
             "/interviews-api/v1/interview/process/clip",
@@ -525,9 +496,7 @@ class InterviewUser(HttpUser):
             logger.error(f"Failed to upload video {video_file}")
         return False     
 
-
-
-    def process_next_question(self):
+    def process_next_question(self, uid):
         """Process the next question in sequence."""
         if not self.access_token or not self.current_interview_id:
             logger.error("Missing credentials for processing next question")
@@ -538,13 +507,17 @@ class InterviewUser(HttpUser):
             return False
 
         # Get the previous and current UID
-        prev_uid = self.available_uids[self.current_uid_index - 1]
+        prev_uid = self.available_uids[self.current_uid_index - 1] if self.current_uid_index > 0 else None
         
+        if prev_uid is None:
+            logger.error("No previous UID available")
+            return False
+
         # Prepare the payload
         payload = {
             "prev_uid": int(prev_uid),
-            "next_uid": int(self.current_uid),
-            "interview_id": self.current_interview_id  # Added interview_id to payload
+            "next_uid": int(uid),
+            "interview_id": self.current_interview_id
         }
 
         headers = {
@@ -552,7 +525,7 @@ class InterviewUser(HttpUser):
             "Content-Type": "application/json"
         }
 
-        logger.info(f"Processing next question - Prev UID: {prev_uid}, Next UID: {self.current_uid}")
+        logger.info(f"Processing next question - Prev UID: {prev_uid}, Next UID: {uid}")
 
         with self.client.post(
             "/interviews-api/v1/mock-interview/question/next",
@@ -567,7 +540,6 @@ class InterviewUser(HttpUser):
 
             response_data = response.json()
             
-            # Add validation for response data
             if not response_data:
                 logger.error("Empty response data from next question API")
                 return False
@@ -577,12 +549,9 @@ class InterviewUser(HttpUser):
                 logger.error("Failed to process uploads for current UID")
                 return False
 
-            logger.info(f"Successfully processed next question for UID {self.current_uid}")
+            logger.info(f"Successfully processed next question for UID {uid}")
             return True
         
-             
-#Hit_duration_clip
-
     def duration_clip_with_retry(self, uid):
         """Call duration-clip API with retries for a specific UID."""
         max_retries = 3
@@ -599,11 +568,17 @@ class InterviewUser(HttpUser):
                     "Content-Type": "application/json"
                 }
 
-                # Updated payload values as per actual requirements
+                # Ensure uid is converted to int safely
+                try:
+                    uid_int = int(uid)
+                except (ValueError, TypeError):
+                    logger.error(f"Invalid UID format: {uid}")
+                    return False
+
                 payload = {
-                    "uid": int(uid),
-                    "clip_count": 24,    # Updated from 2 to 24
-                    "duration": 120      # Updated from 10 to 120
+                    "uid": uid_int,
+                    "clip_count": 24,
+                    "duration": 120
                 }
 
                 logger.info(f"Calling duration-clip API for UID {uid} (Attempt {attempt + 1}/{max_retries})")
@@ -638,12 +613,10 @@ class InterviewUser(HttpUser):
         logger.error(f"All duration-clip API attempts failed for UID {uid}")
         return False   
 
-#Hit_end_interview                
-
     def end_interview(self):
         """End the interview with improved handling."""
-        if not self.access_token or not self.current_interview_id:
-            logger.error("Missing access token or interview ID")
+        if not self.access_token or not self.current_interview_id or not self.current_uid:
+            logger.error("Missing access token, interview ID, or current UID")
             return False
 
         headers = {
@@ -653,7 +626,7 @@ class InterviewUser(HttpUser):
 
         payload = {
             "interview_id": self.current_interview_id,
-            "uid": self.current_uid
+            "uid": str(self.current_uid)  # Ensure uid is string
         }
 
         logger.info(f"Attempting to end interview {self.current_interview_id}")
@@ -768,7 +741,7 @@ class InterviewUser(HttpUser):
                     # Check if everything is complete
                     all_complete = all(
                         all(status.get(field) in ["success", "skipped"] 
-                            for field in fields_to_monitor)
+                        for field in fields_to_monitor
                         for status in all_statuses.values()
                     )
 
